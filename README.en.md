@@ -1,4 +1,51 @@
-# REALITY
+# REALITY — RKN DPI bypass fork
+
+Fork of [XTLS/REALITY](https://github.com/XTLS/REALITY) with fixes for signature-based DPI blocking of the server-side TLS handshake.
+
+## Changes from upstream
+
+### Problem
+
+Russian DPI (and similar systems) detect REALITY by fingerprinting the server's TLS certificate, which in the original implementation has a trivially identifiable structure:
+
+- `SerialNumber = 0` — never appears in real certificates
+- Empty `Subject` / `Issuer` fields
+- Zero `NotBefore` / `NotAfter` (no validity period)
+- **Identical certificate body across all connections** — creates a static per-server DPI fingerprint
+
+### Fix 1 — Per-connection certificate generation
+
+Every incoming connection now gets a freshly generated ed25519 certificate with realistic X.509 fields:
+
+| Field | Original | This fork |
+|-------|----------|-----------|
+| `SerialNumber` | `0` | random 128-bit |
+| `Subject.CommonName` | empty | client SNI |
+| `NotBefore` | zero | `now − (30–89 days)` |
+| `NotAfter` | zero | `NotBefore + (1–2 years)` |
+| `KeyUsage` | unset | `DigitalSignature + ServerAuth` |
+| cert body per server | **static** | **unique per connection** |
+
+The REALITY authentication mechanism (HMAC-SHA512 over the ed25519 public key, keyed with the per-connection `AuthKey`) is unchanged — only the DPI-visible certificate metadata is randomised.
+
+### Fix 2 — `ImpersonateCert`: exact certificate impersonation
+
+Set `Config.ImpersonateCert` to the raw DER bytes of the real leaf certificate of the impersonated host. Each per-connection certificate will then mirror its **exact** `Subject`, `SerialNumber`, `NotBefore`/`NotAfter`, `DNSNames`, `KeyUsage`, and `ExtKeyUsage` — indistinguishable from the real certificate to passive inspection.
+
+```go
+// fetch once at startup
+cert, _ := tls.Dial("tcp", "hostname.com:443", &tls.Config{InsecureSkipVerify: true})
+impersonateDER := cert.ConnectionState().PeerCertificates[0].Raw
+
+cfg := &reality.Config{
+    ImpersonateCert: impersonateDER,
+    // ...
+}
+```
+
+Only the public key and signature bytes differ from the real certificate — and the signature passes REALITY's HMAC verification on the client side.
+
+---
 
 ## THE NEXT FUTURE
 
@@ -74,7 +121,7 @@ REALITY is intented to replace the use of TLS, it can **eliminate the detectable
 **REALITY can point to other people's websites**, no need to buy domain names, configure TLS server, more convenient to deploy a proxy service. It **achieves full real TLS that is undistingwishable with the specified SNI to the middleman**
   
 For general proxy purposes, the minimum standard of the target website: **Websites out of China's GFW, support TLSv1.3 and H2, the domain name is not used for redirection** (the main domain name may be used to redirect to www)
-Bonus points: target website IP reside closer to proxy IP (looks more reasonable, and lower latency), handshake messages after Server Hello are encrypted together (such as dl.google.com), OCSP Stapling
+Bonus points: target website IP reside closer to proxy IP (looks more reasonable, and lower latency), handshake messages after Server Hello are encrypted together (such as hostname.com), OCSP Stapling
 Configuration bonus items: **Block the proxy traffic back to China, TCP/80, UDP/443 are also forwarded to target** (REALITY behaves like port forwarding to the observer, the target IP may be better if it is an uncommon choice among REALITY users)
 
 **REALITY can also be used with proxy protocols other than XTLS**, but this is not recommended due to their obvious and already targeted TLS in TLS characteristics
