@@ -1,4 +1,51 @@
-# REALITY
+# REALITY — RKN DPI bypass fork
+
+Fork of [XTLS/REALITY](https://github.com/XTLS/REALITY) with fixes for signature-based DPI blocking of the server-side TLS handshake.
+
+## Changes from upstream
+
+### Problem
+
+Russian DPI (and similar systems) detect REALITY by fingerprinting the server's TLS certificate, which in the original implementation has a trivially identifiable structure:
+
+- `SerialNumber = 0` — never appears in real certificates
+- Empty `Subject` / `Issuer` fields
+- Zero `NotBefore` / `NotAfter` (no validity period)
+- **Identical certificate body across all connections** — creates a static per-server DPI fingerprint
+
+### Fix 1 — Per-connection certificate generation
+
+Every incoming connection now gets a freshly generated ed25519 certificate with realistic X.509 fields:
+
+| Field | Original | This fork |
+|-------|----------|-----------|
+| `SerialNumber` | `0` | random 128-bit |
+| `Subject.CommonName` | empty | client SNI |
+| `NotBefore` | zero | `now − (30–89 days)` |
+| `NotAfter` | zero | `NotBefore + (1–2 years)` |
+| `KeyUsage` | unset | `DigitalSignature + ServerAuth` |
+| cert body per server | **static** | **unique per connection** |
+
+The REALITY authentication mechanism (HMAC-SHA512 over the ed25519 public key, keyed with the per-connection `AuthKey`) is unchanged — only the DPI-visible certificate metadata is randomised.
+
+### Fix 2 — `ImpersonateCert`: exact certificate impersonation
+
+Set `Config.ImpersonateCert` to the raw DER bytes of the real leaf certificate of the impersonated host. Each per-connection certificate will then mirror its **exact** `Subject`, `SerialNumber`, `NotBefore`/`NotAfter`, `DNSNames`, `KeyUsage`, and `ExtKeyUsage` — indistinguishable from the real certificate to passive inspection.
+
+```go
+// fetch once at startup
+cert, _ := tls.Dial("tcp", "hostname.com:443", &tls.Config{InsecureSkipVerify: true})
+impersonateDER := cert.ConnectionState().PeerCertificates[0].Raw
+
+cfg := &reality.Config{
+    ImpersonateCert: impersonateDER,
+    // ...
+}
+```
+
+Only the public key and signature bytes differ from the real certificate — and the signature passes REALITY's HMAC verification on the client side.
+
+---
 
 ## THE NEXT FUTURE
 
@@ -7,25 +54,17 @@ For client side, please follow https://github.com/XTLS/Xray-core/blob/main/trans
 
 TODO List: TODO
 
-## Donation & NFTs
+### [Collect a REALITY NFT to support the development of REALITY protocol!](https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/2)
 
-### [Collect a Project X NFT to support the development of Project X!](https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/1)
-
-[<img alt="Project X NFT" width="150px" src="https://raw2.seadn.io/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/7fa9ce900fb39b44226348db330e32/8b7fa9ce900fb39b44226348db330e32.svg" />](https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/1)
-
-- **ETH/USDT/USDC: `0xDc3Fe44F0f25D13CACb1C4896CD0D321df3146Ee`**
-- **Project X NFT: https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/1**
-- **VLESS NFT: https://opensea.io/collection/vless**
-- **REALITY NFT: https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/2**
-- **Related links: [VLESS Post-Quantum Encryption](https://github.com/XTLS/Xray-core/pull/5067), [XHTTP: Beyond REALITY](https://github.com/XTLS/Xray-core/discussions/4113), [Announcement of NFTs by Project X](https://github.com/XTLS/Xray-core/discussions/3633)**
+[<img alt="REALITY NFT" width="250px" src="https://raw2.seadn.io/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/b0b1721cf5f4c367584e223bb0805f/37b0b1721cf5f4c367584e223bb0805f.svg" />](https://opensea.io/item/ethereum/0x5ee362866001613093361eb8569d59c4141b76d1/2)
 
 ## VLESS-XTLS-uTLS-REALITY example for [Xray-core](https://github.com/XTLS/Xray-core)
 
-中文 | [English](README.en.md)
+[中文](README.md) | English
 
 ```json5
 {
-    "inbounds": [ // 服务端入站配置
+    "inbounds": [ // Server Inbound Configuration
         {
             "listen": "0.0.0.0",
             "port": 443,
@@ -33,8 +72,8 @@ TODO List: TODO
             "settings": {
                 "clients": [
                     {
-                        "id": "", // 必填，执行 ./xray uuid 生成，或 1-30 字节的字符串
-                        "flow": "xtls-rprx-vision" // 选填，若有，客户端必须启用 XTLS
+                        "id": "", // Required, execute ./xray uuid to generate, or a string of 1-30 characters
+                        "flow": "xtls-rprx-vision" // Optional, if any, client must enable XTLS
                     }
                 ],
                 "decryption": "none"
@@ -43,33 +82,33 @@ TODO List: TODO
                 "network": "raw",
                 "security": "reality",
                 "realitySettings": {
-                    "show": false, // 选填，若为 true，输出调试信息
-                    "target": "example.com:443", // 必填，格式同 VLESS fallbacks 的 dest
-                    "xver": 0, // 选填，格式同 VLESS fallbacks 的 xver
-                    "serverNames": [ // 必填，客户端可用的 serverName 列表，暂不支持 * 通配符
+                    "show": false, // Optional, if true, output debugging information
+                    "target": "example.com:443", // Required, the format is the same as the dest of VLESS fallbacks
+                    "xver": 0, // Optional, the format is the same as xver of VLESS fallbacks
+                    "serverNames": [ // Required, the acceptable serverName list, does not support * wildcards for now
                         "example.com",
                         "www.example.com"
                     ],
-                    "privateKey": "", // 必填，执行 ./xray x25519 生成
-                    "minClientVer": "", // 选填，客户端 Xray 最低版本，格式为 x.y.z
-                    "maxClientVer": "", // 选填，客户端 Xray 最高版本，格式为 x.y.z
-                    "maxTimeDiff": 0, // 选填，允许的最大时间差，单位为毫秒
-                    "shortIds": [ // 必填，客户端可用的 shortId 列表，可用于区分不同的客户端
-                        "", // 若有此项，客户端 shortId 可为空
-                        "0123456789abcdef" // 0 到 f，长度为 2 的倍数，长度上限为 16
+                    "privateKey": "", // Required, execute ./xray x25519 to generate
+                    "minClientVer": "", // Optional, minimum client Xray version, format is x.y.z
+                    "maxClientVer": "", // Optional, the highest version of client Xray, the format is x.y.z
+                    "maxTimeDiff": 0, // Optional, the maximum time difference allowed, in milliseconds
+                    "shortIds": [ // Required, the acceptable shortId list, which can be used to distinguish different clients
+                        "", // If there is this item, the client shortId can be empty
+                        "0123456789abcdef" // 0 to f, the length is a multiple of 2, the maximum length is 16
                     ],
-                    "mldsa65Seed": "", // 选填，执行 ./xray mldsa65 生成，对证书进行抗量子的额外签名
-                    // 下列两个 limit 为选填，可对未通过验证的回落连接限速，bytesPerSec 默认为 0 即不启用
-                    // 回落限速是一种特征，不建议启用，如果您是面板/一键脚本开发者，务必让这些参数随机化
+                    "mldsa65Seed": "", // Optional, execute ./xray mldsa65 to generate, for additional post-quantum signature to the certificate
+                    // These two limitations below are optional, for rate limiting fallback connections, bytesPerSec's default is 0, which means disabled
+                    // It's a detectable pattern, not recommended to be enabled, RANDOMIZE these parameters if you're a web-panel/one-click-script developer
                     "limitFallbackUpload": {
-                        "afterBytes": 0, // 传输指定字节后开始限速
-                        "bytesPerSec": 0, // 基准速率（字节/秒）
-                        "burstBytesPerSec": 0 // 突发速率（字节/秒），大于 bytesPerSec 时生效
+                        "afterBytes": 0, // Start throttling after (bytes)
+                        "bytesPerSec": 0, // Base speed (bytes/s)
+                        "burstBytesPerSec": 0 // Burst capacity (bytes/s), works only when it is larger than bytesPerSec
                     },
                     "limitFallbackDownload": {
-                        "afterBytes": 0, // 传输指定字节后开始限速
-                        "bytesPerSec": 0, // 基准速率（字节/秒）
-                        "burstBytesPerSec": 0 // 突发速率（字节/秒），大于 bytesPerSec 时生效
+                        "afterBytes": 0, // Start throttling after (bytes)
+                        "bytesPerSec": 0, // Base speed (bytes/s)
+                        "burstBytesPerSec": 0 // Burst capacity (bytes/s), works only when it is larger than bytesPerSec
                     }
                 }
             }
@@ -78,30 +117,30 @@ TODO List: TODO
 }
 ```
 
-若用 REALITY 取代 TLS，**可消除服务端 TLS 指纹特征**，仍有前向保密性等，**且证书链攻击无效，安全性超越常规 TLS**  
-**可以指向别人的网站**，无需自己买域名、配置 TLS 服务端，更方便，**实现向中间人呈现指定 SNI 的全程真实 TLS**  
+REALITY is intented to replace the use of TLS, it can **eliminate the detectable TLS fingerprint on the server side**, while still maintain the forward secrecy, etc. **Guard against the certificate chain attack, thus its security exceeds conventional TLS**
+**REALITY can point to other people's websites**, no need to buy domain names, configure TLS server, more convenient to deploy a proxy service. It **achieves full real TLS that is undistingwishable with the specified SNI to the middleman**
+  
+For general proxy purposes, the minimum standard of the target website: **Websites out of China's GFW, support TLSv1.3 and H2, the domain name is not used for redirection** (the main domain name may be used to redirect to www)
+Bonus points: target website IP reside closer to proxy IP (looks more reasonable, and lower latency), handshake messages after Server Hello are encrypted together (such as hostname.com), OCSP Stapling
+Configuration bonus items: **Block the proxy traffic back to China, TCP/80, UDP/443 are also forwarded to target** (REALITY behaves like port forwarding to the observer, the target IP may be better if it is an uncommon choice among REALITY users)
 
-通常代理用途，目标网站最低标准：**国外网站，支持 TLSv1.3 与 H2，域名非跳转用**（主域名可能被用于跳转到 www）  
-加分项：IP 相近（更像，且延迟低），Server Hello 后的握手消息一起加密（如 dl.google.com），有 OCSP Stapling  
-配置加分项：**禁回国流量，TCP/80、UDP/443 也转发**（REALITY 对外表现即为端口转发，目标 IP 冷门或许更好）  
-
-**REALITY 也可以搭配 XTLS 以外的代理协议使用**，但不建议这样做，因为它们存在明显且已被针对的 TLS in TLS 特征  
-REALITY 的下一个主要目标是“**预先构建模式**”，即提前采集目标网站特征，XTLS 的下一个主要目标是 **0-RTT**  
+**REALITY can also be used with proxy protocols other than XTLS**, but this is not recommended due to their obvious and already targeted TLS in TLS characteristics
+The next main goal of REALITY is "**pre-built mode**", that is, to collect and build the characteristics of the target website in advance, and the next main goal of XTLS is **0-RTT**
 
 ```json5
 {
-    "outbounds": [ // 客户端出站配置
+    "outbounds": [ // Client outbound configuration
         {
             "protocol": "vless",
             "settings": {
                 "vnext": [
                     {
-                        "address": "", // 服务端的域名或 IP
+                        "address": "", // The domain name or IP of the server
                         "port": 443,
                         "users": [
                             {
-                                "id": "", // 与服务端一致
-                                "flow": "xtls-rprx-vision", // 与服务端一致
+                                "id": "", // consistent with the server
+                                "flow": "xtls-rprx-vision", // consistent with the server
                                 "encryption": "none"
                             }
                         ]
@@ -112,13 +151,13 @@ REALITY 的下一个主要目标是“**预先构建模式**”，即提前采�
                 "network": "raw",
                 "security": "reality",
                 "realitySettings": {
-                    "show": false, // 选填，若为 true，输出调试信息
-                    "fingerprint": "chrome", // 选填，使用 uTLS 库模拟客户端 TLS 指纹，默认 chrome
-                    "serverName": "", // 服务端 serverNames 之一
-                    "password": "", // 服务端私钥生成的公钥，对客户端来说就是密码
-                    "shortId": "", // 服务端 shortIds 之一
-                    "mldsa65Verify": "", // 选填，服务端 mldsa65Seed 生成的公钥，对证书进行抗量子的额外验证
-                    "spiderX": "" // 爬虫初始路径与参数，建议每个客户端不同
+                    "show": false, // Optional, if true, output debugging information
+                    "fingerprint": "chrome", // Optional, use uTLS library to emulate client TLS fingerprint, defaults to chrome
+                    "serverName": "", // One of the server serverNames
+                    "password": "", // The public key generated from the server's private key, for the client it is the password
+                    "shortId": "", // One of the server shortIds
+                    "mldsa65Verify": "", // Optional, the public key generated from the server's mldsa65Seed, for additional post-quantum verification to the certificate
+                    "spiderX": "" // The initial path and parameters of the crawler, recommended to be different for each client
                 }
             }
         }
@@ -126,17 +165,17 @@ REALITY 的下一个主要目标是“**预先构建模式**”，即提前采�
 }
 ```
 
-REALITY 客户端应当收到由“**临时认证密钥**”签发的“**临时可信证书**”，但以下三种情况会收到目标网站的真证书：
+The REALITY client should receive the "**Temporary Trusted Certificate**" issued by "**Temporary Authentication Key**", but the real certificate of the target website will be received in the following three cases:
 
-1. REALITY 服务端拒绝了客户端的 Client Hello，流量被导入目标网站
-2. 客户端的 Client Hello 被中间人重定向至目标网站
-3. 中间人攻击，可能是目标网站帮忙，也可能是证书链攻击
+1. The REALITY server rejects the Client Hello of the client, and the traffic is redirected to the target website
+2. The Client Hello of the client is redirected to the target website by the middleman
+3. Man-in-the-middle attack, it may be the help of the target website, or it may be a certificate chain attack
 
-REALITY 客户端可以完美区分临时可信证书、真证书、无效证书，并决定下一步动作：
+The REALITY client can perfectly distinguish temporary trusted certificates, real certificates, and invalid certificates, and decide the next action:
 
-1. 收到临时可信证书时，连接可用，一切如常
-2. 收到真证书时，进入爬虫模式
-3. 收到无效证书时，TLS alert，断开连接
+1. When the temporary trusted certificate is received, the proxy connection is available and everything is business as usual
+2. When the real certificate is received, enter the crawler mode (spiderX)
+3. When an invalid certificate is received, TLS alert will be sent and the connection will be disconnected
 
 ## Stargazers over time
 
